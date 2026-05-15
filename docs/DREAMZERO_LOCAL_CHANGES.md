@@ -378,3 +378,46 @@ sbatch scripts/train/dz_libero_train.sbatch
   - 20k：`456/500 = 91.2%`
   - 25k：`462/500 = 92.4%`
   - 30k：`458/500 = 91.6%`
+
+## 9. LIBERO 闭环对齐修复
+
+### 独立 action/state projector
+
+相关文件：
+
+- `groot/vla/model/dreamzero/transform/dreamzero_cotrain.py`
+- `groot/vla/configs/model/dreamzero/transform/dreamzero_cotrain_libero.yaml`
+- `groot/vla/configs/model/dreamzero/action_head/wan_flow_matching_action_tf.yaml`
+- `groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py`
+
+主要改动：
+
+- `embodiment_id` 继续保留 raw embodiment / prompt 路由语义，例如 `libero_sim: 14`。
+- 新增 `action_projector_id`，专门给 DiT 内部 category-specific action/state encoder/decoder 使用。
+- LIBERO 配置里使用 dense projector id：
+  - `libero_sim: 0`
+  - `oxe_droid: 1`
+- 旧 checkpoint 只有 1 个 projector row 时，加载到 2-row 配置会把 row 0 复制到所有 row，避免新增 projector 随机初始化导致训练起点崩掉。
+
+### 动作和夹爪语义
+
+相关文件：
+
+- `groot/vla/configs/data/dreamzero/base_48_wan_fine_aug_relative.yaml`
+- `eval_utils/libero_action_adapter.py`
+- `eval_utils/eval_libero_dreamzero.py`
+- `scripts/data/check_libero_action_semantics.py`
+
+主要改动：
+
+- LIBERO `action.gripper` 训练归一化从 `q99` 改为 `min_max`，保持 RLDS openness 的 0/1 语义。
+- 评测时统一使用 adapter：RLDS `0=closed, 1=open` 转 LIBERO env `+1=close, -1=open`。
+- 评测新增 `--gripper-threshold` 和 `--no-binarize-gripper`，默认仍是 threshold 0.5 后二值化。
+
+数据检查命令：
+
+```bash
+python scripts/data/check_libero_action_semantics.py \
+  --dataset-path /path/to/libero_goal_no_noops_1.0.0_lerobot \
+  --max-rows 200000
+```

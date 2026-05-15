@@ -236,6 +236,10 @@ class DreamTransform(InvertibleModalityTransform):
         default_factory=dict,
         description="The projector index of each embodiment tag.",
     )
+    action_projector_tag_mapping: dict[str, int] = Field(
+        default_factory=dict,
+        description="Compact action/state projector index for each embodiment tag.",
+    )
 
     language_dropout_prob: float = Field(
         default=0.0,
@@ -294,6 +298,22 @@ class DreamTransform(InvertibleModalityTransform):
             self.embodiment_tag is not None
         ), "Embodiment tag not set. Please call set_metadata first."
         return self.embodiment_tag_mapping[self.embodiment_tag.value]
+
+    def get_action_projector_tag(self, tag: str | None = None) -> int:
+        """Get compact action/state projector id.
+
+        This is intentionally separate from raw embodiment ids. Raw ids may be
+        sparse (e.g. libero_sim=14, oxe_droid=17), while category-specific
+        action/state projectors expect dense ids in [0, num_projectors).
+        """
+        if tag is None:
+            assert (
+                self.embodiment_tag is not None
+            ), "Embodiment tag not set. Please call set_metadata first."
+            tag = self.embodiment_tag.value
+        if not self.action_projector_tag_mapping:
+            return 0
+        return self.action_projector_tag_mapping.get(tag, 0)
 
     def check_keys_and_batch_size(self, data):
         grouped_keys = {}
@@ -640,6 +660,7 @@ class DreamTransform(InvertibleModalityTransform):
             transformed_data[k] = v
 
         transformed_data["embodiment_id"] = self.get_embodiment_tag()
+        transformed_data["action_projector_id"] = self.get_action_projector_tag()
 
         if self.embodiment_tag == EmbodimentTag.MECKA_HANDS: 
             is_cotrain_instance = True
@@ -656,6 +677,7 @@ class DreamTransform(InvertibleModalityTransform):
         if is_dream_instance:
             assert "dream_actions" in data
             transformed_data["embodiment_id"] = self.embodiment_tag_mapping["dream"]
+            transformed_data["action_projector_id"] = self.get_action_projector_tag("dream")
             transformed_data["state"] = np.zeros_like(transformed_data["state"])
             actions_shape = transformed_data["action"].shape
 
@@ -674,6 +696,7 @@ class DreamTransform(InvertibleModalityTransform):
             transformed_data["has_real_action"] = np.ones((), dtype=bool)
             transformed_data["has_lapa_action"] = np.zeros((), dtype=bool)
             transformed_data["embodiment_id"] = self.embodiment_tag_mapping["lapa"]
+            transformed_data["action_projector_id"] = self.get_action_projector_tag("lapa")
             transformed_data["state"] = np.zeros_like(transformed_data["state"])
             actions_shape = transformed_data["action"].shape
             lapa_actions = data["lapa_action"]

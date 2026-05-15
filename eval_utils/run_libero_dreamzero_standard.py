@@ -78,7 +78,11 @@ def _worker(args: argparse.Namespace) -> int:
                 str(result_json),
                 "--task-result-dir",
                 str(task_result_dir),
+                "--gripper-threshold",
+                str(args.gripper_threshold),
             ]
+            if args.no_binarize_gripper:
+                cmd.append("--no-binarize-gripper")
             if args.parallel_env_step:
                 cmd.append("--parallel-env-step")
             if args.subproc_env_step:
@@ -114,6 +118,8 @@ def _launch_detached(args: argparse.Namespace) -> None:
         "num_envs": args.num_envs,
         "parallel_env_step": args.parallel_env_step,
         "subproc_env_step": args.subproc_env_step,
+        "gripper_threshold": args.gripper_threshold,
+        "no_binarize_gripper": args.no_binarize_gripper,
         "assignments": assignments,
         "workers": [],
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -146,7 +152,11 @@ def _launch_detached(args: argparse.Namespace) -> None:
             str(output_dir),
             "--worker-id",
             str(worker_id),
+            "--gripper-threshold",
+            str(args.gripper_threshold),
         ]
+        if args.no_binarize_gripper:
+            cmd.append("--no-binarize-gripper")
         if args.parallel_env_step:
             cmd.append("--parallel-env-step")
         if args.subproc_env_step:
@@ -186,6 +196,8 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=1, help="Number of LIBERO envs to run in parallel per model process.")
     parser.add_argument("--parallel-env-step", action="store_true", help="Step vectorized LIBERO environments concurrently with a thread pool.")
     parser.add_argument("--subproc-env-step", action="store_true", help="Step vectorized LIBERO environments in separate subprocesses.")
+    parser.add_argument("--gripper-threshold", type=float, default=0.5)
+    parser.add_argument("--no-binarize-gripper", action="store_true")
     parser.add_argument("--master-port", type=int, default=29543)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--detach", action="store_true")

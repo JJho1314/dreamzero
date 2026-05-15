@@ -402,7 +402,7 @@ transform_libero_sim:
       apply_to: ${modality_config_libero_sim.action.modality_keys}
       normalization_modes:
         action.eef: q99
-        action.gripper: q99
+        action.gripper: min_max
 
     - _target_: groot.vla.data.transform.ConcatTransform
       video_concat_order: ${modality_config_libero_sim.video.modality_keys}

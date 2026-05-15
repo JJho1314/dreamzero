@@ -12,12 +12,18 @@ defaults:
 
 num_views: 2
 libero_prompt_style: raw
+action_projector_num_embeddings: 2
 
 embodiment_tag_to_projector_index:
   # Independent LIBERO id; do not share OXE_DROID's id 17.
   # The current DiT action/state projectors are shared internally; this id is
   # used by the transform and prompt path to keep LIBERO separate from DROID.
   libero_sim: 14
+
+action_projector_tag_to_index:
+  # Dense ids used only by category-specific action/state projectors.
+  libero_sim: 0
+  oxe_droid: 1
 
 data_collator:
   libero_prompt_style: ${libero_prompt_style}

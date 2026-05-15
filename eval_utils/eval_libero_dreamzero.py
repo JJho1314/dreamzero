@@ -84,6 +84,7 @@ torch.load = _torch_load_compat
 
 from groot.vla.data.schema import EmbodimentTag  # noqa: E402
 from groot.vla.model.n1_5.sim_policy import GrootSimPolicy  # noqa: E402
+from eval_utils.libero_action_adapter import rlds_open_to_libero_gripper  # noqa: E402
 from libero.libero import benchmark, get_libero_path  # noqa: E402
 from libero.libero.envs import OffScreenRenderEnv  # noqa: E402
 
@@ -116,6 +117,8 @@ class EvalArgs:
     all_tasks: bool = False
     result_json: Optional[str] = None
     task_result_dir: Optional[str] = None
+    gripper_threshold: float = 0.5
+    no_binarize_gripper: bool = False
 
 
 def _maybe_init_dist() -> None:
@@ -206,9 +209,13 @@ def _extract_action_chunks(result_batch: Batch) -> np.ndarray:
     return np.concatenate([eef, gripper], axis=-1).astype(np.float32)
 
 
-def _env_gripper_from_rlds(open_value: np.ndarray) -> np.ndarray:
-    value = float(np.asarray(open_value, dtype=np.float32).reshape(-1)[0])
-    return np.asarray([1.0 - 2.0 * (value > 0.5)], dtype=np.float32)
+def _env_gripper_from_rlds(
+    open_value: np.ndarray,
+    *,
+    threshold: float = 0.5,
+    binarize: bool = True,
+) -> np.ndarray:
+    return rlds_open_to_libero_gripper(open_value, threshold=threshold, binarize=binarize).reshape(1)
 
 
 class DreamZeroLiberoPolicy:
@@ -523,7 +530,15 @@ def _run_one_task(args: EvalArgs, policy: DreamZeroLiberoPolicy, task_suite, tas
                 pending_actions = [chunk[i] for i in range(keep)]
             action = pending_actions.pop(0)
             env_action = np.concatenate(
-                [action[:6], _env_gripper_from_rlds(action[6:7])], axis=0
+                [
+                    action[:6],
+                    _env_gripper_from_rlds(
+                        action[6:7],
+                        threshold=args.gripper_threshold,
+                        binarize=not args.no_binarize_gripper,
+                    ),
+                ],
+                axis=0,
             )
             obs, _, done, _ = env.step(env_action.tolist())
             if done:
@@ -669,7 +684,15 @@ def _run_one_task_vectorized(args: EvalArgs, policy: DreamZeroLiberoVectorPolicy
                         continue
                     action = pending_actions[env_index].pop(0)
                     env_action = np.concatenate(
-                        [action[:6], _env_gripper_from_rlds(action[6:7])], axis=0
+                        [
+                            action[:6],
+                            _env_gripper_from_rlds(
+                                action[6:7],
+                                threshold=args.gripper_threshold,
+                                binarize=not args.no_binarize_gripper,
+                            ),
+                        ],
+                        axis=0,
                     )
                     if env_pool is not None:
                         step_items.append((env_index, env_action.tolist()))
@@ -815,6 +838,8 @@ def main() -> None:
     parser.add_argument("--all-tasks", action="store_true")
     parser.add_argument("--result-json", default=None)
     parser.add_argument("--task-result-dir", default=None)
+    parser.add_argument("--gripper-threshold", type=float, default=0.5)
+    parser.add_argument("--no-binarize-gripper", action="store_true")
     ns = parser.parse_args()
     run(EvalArgs(**vars(ns)))
 

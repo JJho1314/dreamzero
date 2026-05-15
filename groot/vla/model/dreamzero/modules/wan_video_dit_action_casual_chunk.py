@@ -41,6 +41,44 @@ class CategorySpecificLinear(nn.Module):
         selected_b = self.b[cat_ids]
         return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Old DreamZero checkpoints used a single shared category. When the
+        # current config asks for multiple compact projector categories, seed
+        # every category from the old shared weights so fine-tuning starts from
+        # the same policy behavior instead of random projector rows.
+        for name in ("W", "b"):
+            key = prefix + name
+            if key not in state_dict:
+                continue
+            loaded = state_dict[key]
+            target = getattr(self, name)
+            if (
+                loaded.shape != target.shape
+                and loaded.ndim == target.ndim
+                and loaded.shape[0] == 1
+                and target.shape[0] > 1
+                and loaded.shape[1:] == target.shape[1:]
+            ):
+                state_dict[key] = loaded.expand(target.shape[0], *loaded.shape[1:]).clone()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
 
 class CategorySpecificMLP(nn.Module):
     def __init__(self, num_categories, input_dim, hidden_dim, output_dim):
@@ -1362,8 +1400,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_state_per_block = num_state_per_block
         self.concat_first_frame_latent = concat_first_frame_latent
 
-        max_num_embodiments = 1
-
         self.state_encoder = CategorySpecificMLP(
             num_categories=max_num_embodiments,
             input_dim=max_state_dim,
@@ -1425,6 +1461,30 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         self.gradient_checkpointing = True
         self.independent_first_frame = False if self.num_frame_per_block == 1 else True
+
+    def _prepare_projector_ids(
+        self,
+        embodiment_id: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if embodiment_id is None:
+            return torch.zeros(batch_size, device=device, dtype=torch.long)
+
+        ids = torch.as_tensor(embodiment_id, device=device, dtype=torch.long).reshape(-1)
+        if ids.numel() == 1 and batch_size != 1:
+            ids = ids.repeat(batch_size)
+        if ids.shape[0] != batch_size:
+            raise ValueError(f"Expected {batch_size} action projector ids, got shape {tuple(ids.shape)}")
+
+        if self.max_num_embodiments <= 1:
+            return torch.zeros_like(ids)
+        if torch.any(ids < 0) or torch.any(ids >= self.max_num_embodiments):
+            raise ValueError(
+                f"Action projector ids must be in [0, {self.max_num_embodiments}), got {ids.detach().cpu().tolist()}. "
+                "Pass compact action_projector_id instead of raw embodiment_id."
+            )
+        return ids
 
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -1752,9 +1812,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         F = timestep.shape[1]
 
         if action is not None:
-            embodiment_id = torch.tensor([0], device=x.device).repeat(x.shape[0])
-            action_features = self.action_encoder(action, timestep_action, embodiment_id)
-            state_features = self.state_encoder(state, embodiment_id)
+            projector_id = self._prepare_projector_ids(embodiment_id, x.shape[0], x.device)
+            action_features = self.action_encoder(action, timestep_action, projector_id)
+            state_features = self.state_encoder(state, projector_id)
             action_register = torch.cat([action_features, state_features], dim=1)
             action_length = action_features.shape[1]
             action_register_length = action_register.shape[1]
@@ -1810,7 +1870,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         if action is not None:
             action_noise_pred = x[:, seq_len: seq_len + action_length]
-            action_noise_pred = self.action_decoder(action_noise_pred, embodiment_id)
+            action_noise_pred = self.action_decoder(action_noise_pred, projector_id)
         else:
             action_noise_pred = None
 
@@ -2055,10 +2115,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         # time embeddings
         if action is not None:
-            embodiment_id = torch.tensor([0]).repeat(x.shape[0]).to(device=embodiment_id.device)
-            action_features = self.action_encoder(action, timestep_action, embodiment_id)
+            projector_id = self._prepare_projector_ids(embodiment_id, x.shape[0], x.device)
+            action_features = self.action_encoder(action, timestep_action, projector_id)
             action_length = action_features.shape[1]
-            state_features = self.state_encoder(state, embodiment_id)
+            state_features = self.state_encoder(state, projector_id)
             action_register = torch.cat([action_features, state_features], dim=1)
             action_register_length = action_register.shape[1]
             x = torch.cat([x, action_register], dim=1)
@@ -2156,7 +2216,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         if action is not None:
             action_noise_pred = x[:, seq_len: seq_len + action_length]
-            action_noise_pred = self.action_decoder(action_noise_pred, embodiment_id)
+            action_noise_pred = self.action_decoder(action_noise_pred, projector_id)
         else:
             action_noise_pred = None
 

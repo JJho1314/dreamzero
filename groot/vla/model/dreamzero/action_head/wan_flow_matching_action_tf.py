@@ -610,6 +610,7 @@ class WANPolicyHead(ActionHead):
         data = action_input 
         # Get embodiment ID.
         embodiment_id = action_input.embodiment_id
+        action_projector_id = getattr(action_input, "action_projector_id", embodiment_id)
         # print("embodiment_id", embodiment_id)
         has_real_action = action_input.has_real_action
         action_mask = action_input.action_mask
@@ -764,7 +765,7 @@ class WANPolicyHead(ActionHead):
             if actions.numel() > 0:
                 video_noise_pred, action_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
-                    state=state_features, embodiment_id=embodiment_id,
+                    state=state_features, embodiment_id=action_projector_id,
                     action=noisy_actions, timestep_action=timestep_action, 
                     clean_x=latents.transpose(1, 2),
                 )
@@ -772,7 +773,7 @@ class WANPolicyHead(ActionHead):
                 video_noise_pred, action_noise_pred = self.model(
                     noisy_latents.transpose(1, 2), timestep=timestep, timestep_action=timestep_action, 
                     clip_feature=clip_feas, y=ys, context=prompt_embs, seq_len=seq_len,
-                    state=state_features, embodiment_id=embodiment_id,
+                    state=state_features, embodiment_id=action_projector_id,
                     clean_x=latents.transpose(1, 2),
                 )
 
@@ -993,6 +994,7 @@ class WANPolicyHead(ActionHead):
         videos = data["images"]
 
         embodiment_id = action_input.embodiment_id
+        action_projector_id = getattr(action_input, "action_projector_id", embodiment_id)
         state_features = action_input.state
 
         videos = rearrange(videos, "b t h w c -> b c t h w")
@@ -1261,7 +1263,7 @@ class WANPolicyHead(ActionHead):
                     action=noisy_input_action,
                     timestep_action=timestep_action,
                     state=state_features,
-                    embodiment_id=embodiment_id,
+                    embodiment_id=action_projector_id,
                     context=prompt_embs,
                     seq_len=seq_len,
                     y=y,
