@@ -19,6 +19,7 @@ from abc import ABC
 import contextlib
 import json
 import logging
+import numbers
 import os
 from pathlib import Path
 import shutil
@@ -35,6 +36,7 @@ from torch.profiler import ProfilerActivity, profile
 from torch.utils.data import DataLoader, Dataset, Sampler
 import transformers
 from transformers import TrainerCallback, set_seed
+from transformers.integrations.integration_utils import WandbCallback, rewrite_logs
 from transformers.trainer import (
     # ALL_LAYERNORM_LAYERS,  # ShardedDDPOption,  # Removed deprecated import
     TRAINER_STATE_NAME,
@@ -96,6 +98,43 @@ class LossLoggerCallback(TrainerCallback):
         if len(entry) > 1:  # more than just "step"
             with open(self.output_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
+
+
+class TrainerStepWandbCallback(WandbCallback):
+    """W&B callback that uses HuggingFace Trainer global_step as the W&B step."""
+
+    def setup(self, args, state, model, **kwargs):
+        super().setup(args, state, model, **kwargs)
+        if self._wandb is not None and state.is_world_process_zero:
+            self._wandb.define_metric("train/global_step")
+            self._wandb.define_metric("train/*", step_metric="train/global_step")
+            self._wandb.define_metric("eval/*", step_metric="train/global_step")
+
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        if logs is None or self._wandb is None:
+            return
+        if not self._initialized:
+            self.setup(args, state, model)
+        if not state.is_world_process_zero:
+            return
+
+        single_value_scalars = {
+            "train_runtime",
+            "train_samples_per_second",
+            "train_steps_per_second",
+            "train_loss",
+            "total_flos",
+        }
+        for key, value in logs.items():
+            if key in single_value_scalars and isinstance(value, numbers.Number):
+                self._wandb.run.summary[key] = value
+
+        non_scalar_logs = {key: value for key, value in logs.items() if key not in single_value_scalars}
+        non_scalar_logs = rewrite_logs(non_scalar_logs)
+        self._wandb.log(
+            {**non_scalar_logs, "train/global_step": state.global_step},
+            step=state.global_step,
+        )
 
 
 class CheckpointFormatCallback(TrainerCallback):
@@ -792,6 +831,16 @@ class BaseExperiment(ABC):
         # Fully instantiate the trainer with dataclasses instances.
         trainer = trainer_partial(data_collator=data_collator, args=training_args)
         trainer.base_cfg = cfg
+        report_to = training_args.report_to or []
+        if isinstance(report_to, str):
+            report_to = [report_to]
+        if "wandb" in report_to:
+            trainer.callback_handler.callbacks = [
+                callback
+                for callback in trainer.callback_handler.callbacks
+                if not isinstance(callback, WandbCallback)
+            ]
+            trainer.add_callback(TrainerStepWandbCallback())
         train_dl_len = len(trainer.get_train_dataloader())
         eval_dl_len = (
             len(trainer.get_eval_dataloader()) if val_dataset is not None else "no eval dataloader"

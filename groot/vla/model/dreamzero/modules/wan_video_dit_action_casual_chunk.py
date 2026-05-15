@@ -2128,6 +2128,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         def create_custom_forward(module):
             def custom_forward(*inputs, **kwargs):
                 outputs, updated_kv_cache = module(*inputs, **kwargs)
+                if isinstance(outputs, tuple):
+                    outputs, nested_kv_cache = outputs
+                    if updated_kv_cache is None:
+                        updated_kv_cache = nested_kv_cache
                 assert updated_kv_cache is None
                 return outputs
             return custom_forward
@@ -2140,7 +2144,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     use_reentrant=False,
                 )
             else:
-                x = block(x, **kwargs)
+                x, updated_kv_cache = block(x, **kwargs)
+                if isinstance(x, tuple):
+                    x, nested_kv_cache = x
+                    if updated_kv_cache is None:
+                        updated_kv_cache = nested_kv_cache
+                assert updated_kv_cache is None
 
         if clean_x is not None:
             x = x[:, clean_x.shape[1]:]

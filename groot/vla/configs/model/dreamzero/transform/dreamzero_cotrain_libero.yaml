@@ -1,0 +1,26 @@
+# @package _global_
+# LIBERO-specific DreamZero transform.
+#
+# This keeps LIBERO separate from OXE/DROID in the transform-level
+# embodiment mapping and uses raw LIBERO task language, matching the
+# prompt style used by FastWAM/LingBotVA LIBERO eval/training more closely
+# than the generic DreamZero multi-view layout prompt.
+
+defaults:
+  - dreamzero_cotrain
+  - _self_
+
+num_views: 2
+libero_prompt_style: raw
+
+embodiment_tag_to_projector_index:
+  # Independent LIBERO id; do not share OXE_DROID's id 17.
+  # The current DiT action/state projectors are shared internally; this id is
+  # used by the transform and prompt path to keep LIBERO separate from DROID.
+  libero_sim: 14
+
+data_collator:
+  libero_prompt_style: ${libero_prompt_style}
+
+model_specific_transform:
+  libero_prompt_style: ${libero_prompt_style}

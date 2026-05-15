@@ -1,0 +1,64 @@
+# @package _global_
+# LIBERO data config for Wan 2.2 5B backbone.
+# Per-view resolution is 224x224. Two LIBERO views are concatenated horizontally
+# by DreamTransform to 224x448, then the Wan22 action head resizes to 160x320
+# before VAE/DiT so frame_seqlen remains 50.
+# LIBERO action is delta-EEF + gripper, so we do NOT relativize again
+# (relative_action: false, relative_action_keys: []).
+
+defaults:
+  - dreamzero/base_48_wan_fine_aug_relative
+  - _self_
+
+image_resolution_width: 224
+image_resolution_height: 224
+
+max_state_dim: 64
+use_global_metadata: false
+relative_action: false
+relative_action_per_horizon: false
+relative_action_keys: []
+
+max_chunk_size: 4
+dataset_shard_sampling_rate: 0.1
+mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
+single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotSubLangSingleActionChunkDatasetDROID
+
+# 4 LIBERO subsets, override via CLI / env:
+#   libero_data_root_goal=...   libero_data_root_object=...
+#   libero_data_root_spatial=... libero_data_root_10=...
+libero_data_root_goal: /data/user/jhe724/workspace/data/libero_datasets/libero_lerobot/libero_goal_no_noops_1.0.0_lerobot
+libero_data_root_object: /data/user/jhe724/workspace/data/libero_datasets/libero_lerobot/libero_object_no_noops_1.0.0_lerobot
+libero_data_root_spatial: /data/user/jhe724/workspace/data/libero_datasets/libero_lerobot/libero_spatial_no_noops_1.0.0_lerobot
+libero_data_root_10: /data/user/jhe724/workspace/data/libero_datasets/libero_lerobot/libero_10_no_noops_1.0.0_lerobot
+
+train_dataset:
+  _target_: ${mixture_dataset_cls}
+  _convert_: object
+  mixture_spec:
+    - dataset_path:
+        libero_sim:
+          - ${libero_data_root_goal}
+          - ${libero_data_root_object}
+          - ${libero_data_root_spatial}
+          - ${libero_data_root_10}
+      dataset_weight: 1.0
+      distribute_weights: true
+
+  dataset_class: ${single_dataset_cls}
+  all_modality_configs: ${modality_configs}
+  all_transforms: ${transforms}
+  metadata_versions: ${metadata_versions}
+  fps: ${fps}
+  dataset_kwargs:
+    video_backend: decord
+    use_global_metadata: ${use_global_metadata}
+    max_chunk_size: ${max_chunk_size}
+    relative_action: ${relative_action}
+    relative_action_keys: ${relative_action_keys}
+    relative_action_per_horizon: ${relative_action_per_horizon}
+  mixture_kwargs:
+    training: true
+    balance_dataset_weights: false
+    seed: 42
+    shard_sampling_rate: ${dataset_shard_sampling_rate}

@@ -89,7 +89,29 @@ class HuggingfaceTokenizer:
         return text
 
 
-def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodiment_tag_mapping=None) -> dict:
+def _format_libero_prompt(task: str, prompt_style: str) -> str:
+    task = str(task).lower()
+    if prompt_style == "raw":
+        return task
+    if prompt_style == "simple":
+        return "A robot " + task
+    if prompt_style == "layout":
+        return (
+            "A two-view video shows that a robot "
+            + task
+            + " The video is split horizontally: the left view shows the primary camera and the right view shows the wrist camera. The robot "
+            + task
+        )
+    raise ValueError(f"Unsupported libero_prompt_style={prompt_style!r}. Expected raw, simple, or layout.")
+
+
+def collate(
+    features: List[dict],
+    tokenizer: AutoTokenizer,
+    num_views=3,
+    embodiment_tag_mapping=None,
+    libero_prompt_style: str = "layout",
+) -> dict:
     batch = {}
     keys = features[0].keys()
 
@@ -109,6 +131,8 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                     
                     if num_views > 1 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.AGIBOT.value]:
                         processed_item = "A multi-view video shows that a robot " + processed_item.lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + processed_item.lower()
+                    elif num_views == 2 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.LIBERO_SIM.value]:
+                        processed_item = _format_libero_prompt(processed_item, libero_prompt_style)
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.OXE_DROID.value]:
                         processed_item = (
                             "A multi-view video shows that a robot "
@@ -131,6 +155,8 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                     # If parsing fails or item is already a string, use it directly
                     if num_views > 1 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.AGIBOT.value]:
                         item = "A multi-view video shows that a robot " + str(item).lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + str(item).lower()
+                    elif num_views == 2 and elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.LIBERO_SIM.value]:
+                        item = _format_libero_prompt(str(item), libero_prompt_style)
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.OXE_DROID.value]:
                         item = (
                             "A multi-view video shows that a robot "
@@ -160,20 +186,38 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
             batch['text_attention_mask_negative'] = mask
         else:
             values = [elem[key] for elem in features]
-            batch[key] = torch.from_numpy(np.stack(values))
+            try:
+                batch[key] = torch.from_numpy(np.stack(values))
+            except ValueError as exc:
+                shapes = [getattr(value, "shape", None) for value in values]
+                raise ValueError(f"Failed to stack key={key!r}; shapes={shapes}") from exc
     return batch
 
 
 
 class DefaultDataCollator(DataCollatorMixin):
-    def __init__(self, tokenizer_path: str="google/umt5-xxl", max_length: int=512, num_views: int=1, embodiment_tag_mapping=None):
+    def __init__(
+        self,
+        tokenizer_path: str="google/umt5-xxl",
+        max_length: int=512,
+        num_views: int=1,
+        embodiment_tag_mapping=None,
+        libero_prompt_style: str = "layout",
+    ):
         super().__init__()
         self.tokenizer = HuggingfaceTokenizer(name=tokenizer_path, seq_len=max_length, clean='whitespace')
         self.num_views = num_views
         self.embodiment_tag_mapping = embodiment_tag_mapping
+        self.libero_prompt_style = libero_prompt_style
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return collate(features, self.tokenizer, self.num_views, self.embodiment_tag_mapping)
+        return collate(
+            features,
+            self.tokenizer,
+            self.num_views,
+            self.embodiment_tag_mapping,
+            self.libero_prompt_style,
+        )
 
 
 class DreamTransform(InvertibleModalityTransform):
@@ -214,7 +258,10 @@ class DreamTransform(InvertibleModalityTransform):
     embodiment_tag: EmbodimentTag | None = None
     state_horizon: int
     action_horizon: int
+    max_chunk_size: int = 1
+    num_frames: Optional[int] = None
     num_views: int = 3
+    libero_prompt_style: str = "layout"
 
     # Add tokenizer attribute
     tokenizer_path: str = Field(
@@ -354,6 +401,15 @@ class DreamTransform(InvertibleModalityTransform):
 
                 return concat_images
             
+            # For two-view datasets such as LIBERO, keep both cameras at full
+            # vertical resolution and concatenate horizontally instead of
+            # wasting half of a 2x2 grid on black pixels.
+            if v == 2:
+                concat_images = np.zeros((1, t, c, h, 2*w), dtype=images.dtype)
+                concat_images[0, :, :, :, :w] = images[0]
+                concat_images[0, :, :, :, w:] = images[1]
+                return concat_images
+
             # For other embodiments: use 2x2 grid layout
             # Layout: [head, right]
             #         [left, black]
@@ -379,6 +435,26 @@ class DreamTransform(InvertibleModalityTransform):
             return concat_images
         
         return images
+
+    def _pad_or_trim_video(self, images: np.ndarray) -> np.ndarray:
+        """Make video length stable across samples so batches can be stacked."""
+        if self.num_frames is None:
+            return images
+
+        target_frames = self.num_frames
+        current_frames = images.shape[1]
+        if current_frames == target_frames:
+            return images
+        if current_frames > target_frames:
+            return images[:, :target_frames]
+
+        pad_frames = target_frames - current_frames
+        if current_frames == 0:
+            pad_shape = (images.shape[0], pad_frames, *images.shape[2:])
+            pad = np.zeros(pad_shape, dtype=images.dtype)
+        else:
+            pad = np.repeat(images[:, -1:, ...], pad_frames, axis=1)
+        return np.concatenate([images, pad], axis=1)
 
     def _prepare_language(self, data: dict):
         """Tokenize data['language'] (or default_instruction if missing)."""
@@ -445,10 +521,12 @@ class DreamTransform(InvertibleModalityTransform):
         Return (state, state_mask, n_state_tokens).
         """
 
+        target_state_tokens = self.max_chunk_size * self.state_horizon
+
         if "state" not in data:
-            state = np.zeros((self.state_horizon, self.max_state_dim))
-            state_mask = np.zeros((self.state_horizon, self.max_state_dim), dtype=bool)
-            n_state_tokens = self.state_horizon
+            state = np.zeros((target_state_tokens, self.max_state_dim))
+            state_mask = np.zeros((target_state_tokens, self.max_state_dim), dtype=bool)
+            n_state_tokens = target_state_tokens
             return state, state_mask, n_state_tokens
 
         state = data["state"]
@@ -468,6 +546,14 @@ class DreamTransform(InvertibleModalityTransform):
         state_mask = np.zeros_like(state).astype(bool)
         state_mask[:, :n_state_dims] = True
 
+        if state.shape[0] > target_state_tokens:
+            state = state[:target_state_tokens]
+            state_mask = state_mask[:target_state_tokens]
+        elif state.shape[0] < target_state_tokens:
+            pad_tokens = target_state_tokens - state.shape[0]
+            state = np.pad(state, ((0, pad_tokens), (0, 0)), "constant")
+            state_mask = np.pad(state_mask, ((0, pad_tokens), (0, 0)), "constant")
+
         # We only have 1 "proprio" token to represent the entire state
         n_state_tokens = state.shape[0]
         return state, state_mask, n_state_tokens
@@ -476,10 +562,12 @@ class DreamTransform(InvertibleModalityTransform):
         """
         Pad to max_action_dim, return masks.
         """
+        target_action_tokens = self.max_chunk_size * self.action_horizon
+
         if "action" not in data:
-            actions = np.zeros((self.action_horizon, self.max_action_dim))
-            actions_mask = np.zeros((self.action_horizon, self.max_action_dim), dtype=bool)
-            n_action_tokens = self.action_horizon
+            actions = np.zeros((target_action_tokens, self.max_action_dim))
+            actions_mask = np.zeros((target_action_tokens, self.max_action_dim), dtype=bool)
+            n_action_tokens = target_action_tokens
             return actions, actions_mask, n_action_tokens
 
         actions = data["action"]
@@ -499,6 +587,15 @@ class DreamTransform(InvertibleModalityTransform):
         actions_mask = np.zeros((n_action_tokens, self.max_action_dim), dtype=bool)
         actions_mask[:, :n_action_dims] = True
 
+        if actions.shape[0] > target_action_tokens:
+            actions = actions[:target_action_tokens]
+            actions_mask = actions_mask[:target_action_tokens]
+        elif actions.shape[0] < target_action_tokens:
+            pad_tokens = target_action_tokens - actions.shape[0]
+            actions = np.pad(actions, ((0, pad_tokens), (0, 0)), "constant")
+            actions_mask = np.pad(actions_mask, ((0, pad_tokens), (0, 0)), "constant")
+
+        n_action_tokens = actions.shape[0]
         return actions, actions_mask, n_action_tokens
 
     def apply_single(self, data: dict) -> dict:
@@ -506,6 +603,7 @@ class DreamTransform(InvertibleModalityTransform):
 
         # 1) Prepare video and language with vlm processing.
         images = self._prepare_video(data)
+        images = self._pad_or_trim_video(images)
         images = images.astype(np.uint8)
         language, is_lapa_instance, is_dream_instance, is_cotrain_instance = self._prepare_language(data)
         batch_data = {"images": images, "language": language}
@@ -610,7 +708,13 @@ class DreamTransform(InvertibleModalityTransform):
         data_split = [tree.map_structure(lambda x: x[i], data) for i in range(batch_size)]
         # Process each element.
         data_split_processed = [self.apply_single(elem) for elem in data_split]
-        return collate(data_split_processed, self.tokenizer, self.num_views, self.embodiment_tag_mapping)
+        return collate(
+            data_split_processed,
+            self.tokenizer,
+            self.num_views,
+            self.embodiment_tag_mapping,
+            self.libero_prompt_style,
+        )
 
     def apply(self, data: dict) -> dict:
         if not self.training and data["video"].ndim == 5:
@@ -627,4 +731,3 @@ class DreamTransform(InvertibleModalityTransform):
 
     def __call__(self, data: dict) -> dict:
         return self.apply(data)
-

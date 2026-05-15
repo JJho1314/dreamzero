@@ -5,12 +5,17 @@ import cv2
 from einops import rearrange
 import functools
 import numpy as np
+import os
 from pydantic import Field, PrivateAttr, field_validator
 import torch
 import torchvision.transforms.v2 as T
 
 from groot.vla.data.schema import DatasetMetadata
 from groot.vla.data.transform.base import ModalityTransform
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
 class VideoTransform(ModalityTransform):
@@ -254,6 +259,13 @@ class VideoCrop(VideoTransform):
             assert (
                 self.width is not None
             ), "Height and width must be either both provided or both None"
+        if _env_flag("DREAMZERO_DISABLE_VIDEO_CROP"):
+            if self.backend == "torchvision":
+                return T.Identity()
+            elif self.backend == "albumentations":
+                return A.NoOp(p=1)
+            else:
+                raise ValueError(f"Backend {self.backend} not supported")
         # 2. Create the transform
         size = (int(self.height * self.scale), int(self.width * self.scale))
         if self.backend == "torchvision":
@@ -274,6 +286,8 @@ class VideoCrop(VideoTransform):
             raise ValueError(f"Backend {self.backend} not supported")
 
     def check_input(self, data: dict[str, Any]):
+        if _env_flag("DREAMZERO_DISABLE_VIDEO_CROP"):
+            return super().check_input(data)
         super().check_input(data)
         # Check the input resolution
         for key in self.apply_to:
@@ -346,6 +360,13 @@ class VideoResize(VideoTransform):
         Returns:
             Callable: The resize transform.
         """
+        if _env_flag("DREAMZERO_DISABLE_VIDEO_RESIZE"):
+            if self.backend == "torchvision":
+                return T.Identity()
+            elif self.backend == "albumentations":
+                return A.NoOp(p=1)
+            else:
+                raise ValueError(f"Backend {self.backend} not supported")
         interpolation = self._get_interpolation(self.interpolation, self.backend)
         if interpolation is None:
             raise ValueError(
@@ -573,6 +594,8 @@ class VideoToTensor(VideoTransform):
                 expected_resolution = self.original_resolutions[key]
             else:
                 expected_resolution = input_resolution
+            if os.environ.get("DREAMZERO_FRAME_CACHE_ROOT") and input_resolution != expected_resolution:
+                continue
             assert (
                 input_resolution == expected_resolution
             ), f"Video {key} has invalid resolution {input_resolution}, expected {expected_resolution}. Full shape: {data[key].shape}"

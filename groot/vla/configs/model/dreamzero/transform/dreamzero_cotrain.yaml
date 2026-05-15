@@ -40,5 +40,7 @@ model_specific_transform:
   max_length: ${max_length}
   state_horizon: ${state_horizon}
   action_horizon: ${action_horizon}
+  max_chunk_size: ${max_chunk_size}
+  num_frames: ${num_frames}
   embodiment_tag_mapping: ${embodiment_tag_to_projector_index}
   tokenizer_path: ${tokenizer_path}

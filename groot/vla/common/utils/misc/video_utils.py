@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 import subprocess
 
 import av
@@ -20,6 +22,40 @@ try:
     TORCHCODEC_AVAILABLE = True
 except (ImportError, RuntimeError):
     TORCHCODEC_AVAILABLE = False
+
+
+def _frame_cache_path(video_path: str) -> Path | None:
+    cache_root = os.environ.get("DREAMZERO_FRAME_CACHE_ROOT")
+    source_root = os.environ.get("DREAMZERO_FRAME_CACHE_SOURCE_ROOT")
+    if not cache_root or not source_root:
+        return None
+
+    video_path_obj = Path(video_path).resolve()
+    source_root_obj = Path(source_root).resolve()
+    try:
+        rel_path = video_path_obj.relative_to(source_root_obj)
+    except ValueError:
+        return None
+
+    return Path(cache_root) / rel_path.with_suffix(".npy")
+
+
+def _get_cached_frames_by_timestamps(
+    video_path: str,
+    timestamps: list[float] | np.ndarray,
+    fps: None | float = None,
+) -> np.ndarray | None:
+    cache_path = _frame_cache_path(video_path)
+    if cache_path is None or not cache_path.exists():
+        return None
+    if fps is None:
+        fps = 20
+
+    frames = np.load(cache_path, mmap_mode="r")
+    timestamps = np.asarray(timestamps, dtype=np.float64)
+    indices = np.rint(timestamps * float(fps)).astype(np.int64)
+    indices = np.clip(indices, 0, frames.shape[0] - 1)
+    return np.asarray(frames[indices])
 
 
 def _get_video_info_ffmpeg(video_path: str) -> dict:
@@ -307,6 +343,10 @@ def get_frames_by_timestamps(
     Returns:
         np.ndarray: Frames at the specified timestamps.
     """
+    cached_frames = _get_cached_frames_by_timestamps(video_path, timestamps, fps=fps)
+    if cached_frames is not None:
+        return cached_frames
+
     if video_backend == "decord":
         if not DECORD_AVAILABLE:
             raise ImportError("decord is not available. Install it with: pip install decord")

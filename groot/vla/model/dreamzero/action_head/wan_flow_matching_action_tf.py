@@ -235,6 +235,9 @@ class WANPolicyHead(ActionHead):
         self.cpu_offload = False
 
         self.model = instantiate(config.diffusion_model_cfg)
+        if hasattr(self.model, "gradient_checkpointing"):
+            self.model.gradient_checkpointing = self.use_gradient_checkpointing
+            print(f"Diffusion model gradient checkpointing: {self.model.gradient_checkpointing}")
         self.action_dim = config.action_dim
         self.action_horizon = config.action_horizon
         self.num_inference_timesteps = config.num_inference_timesteps
@@ -620,7 +623,6 @@ class WANPolicyHead(ActionHead):
         videos = data["images"]
 
         videos = rearrange(videos, "b t h w c -> b c t h w")
-        print("videos", videos.shape)
         
 
         if videos.dtype == torch.uint8:
@@ -792,7 +794,7 @@ class WANPolicyHead(ActionHead):
                 action_loss_per_sample = torch.nn.functional.mse_loss(
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
-                action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                action_loss_per_sample = has_real_action[:, None, None].float() * action_loss_per_sample  # apply has_real_action
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
@@ -1358,10 +1360,13 @@ class WANPolicyHead(ActionHead):
         import os
         ENABLE_TENSORRT = os.getenv("ENABLE_TENSORRT", "False").lower() == "true"
         LOAD_TRT_ENGINE = os.getenv("LOAD_TRT_ENGINE", None)
+        DISABLE_DREAMZERO_TORCH_COMPILE = (
+            os.getenv("DISABLE_DREAMZERO_TORCH_COMPILE", "False").lower() == "true"
+        )
 
         # Torch compile the modules. Skip _forward_blocks: Dynamo with fullgraph can fail on
         # shape variation (e.g. x [1,50,C] vs e [1,200,C]); the block aligns e to x at runtime.
-        if not ENABLE_TENSORRT:
+        if not ENABLE_TENSORRT and not DISABLE_DREAMZERO_TORCH_COMPILE:
             print("Torch compiling the TextEncoder, ImageEncoder, and VAE modules (Wan _forward_blocks not compiled).")
 
             self.text_encoder.forward = torch.compile(
@@ -1375,6 +1380,8 @@ class WANPolicyHead(ActionHead):
             self.vae.model.encode = torch.compile(
                 mode="reduce-overhead", fullgraph=True, dynamic=False,
             )(self.vae.model.encode)
+        elif DISABLE_DREAMZERO_TORCH_COMPILE:
+            print("Skipping torch compile because DISABLE_DREAMZERO_TORCH_COMPILE=true.")
         
         self.trt_engine = None
         if LOAD_TRT_ENGINE is not None:
