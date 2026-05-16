@@ -92,7 +92,7 @@ class LossLoggerCallback(TrainerCallback):
         if not state.is_world_process_zero or logs is None:
             return
         entry = {"step": state.global_step}
-        for key in ("loss", "dynamics_loss_avg", "action_loss_avg", "learning_rate"):
+        for key in ("loss", "eval_loss", "dynamics_loss_avg", "action_loss_avg", "learning_rate"):
             if key in logs:
                 entry[key] = logs[key]
         if len(entry) > 1:  # more than just "step"
@@ -356,6 +356,47 @@ class BaseSampler(Sampler):
         return len(self.data_source)
 
 
+class DatasetIndexSubset(Dataset):
+    """Subset wrapper that preserves dataset helper attributes used by the trainer."""
+
+    def __init__(self, dataset: Dataset, indices: list[int], split_name: str):
+        self.dataset = dataset
+        self.indices = list(indices)
+        self.split_name = split_name
+        if hasattr(dataset, "merged_metadata"):
+            self.merged_metadata = dataset.merged_metadata
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        return self.dataset[self.indices[index]]
+
+    def set_epoch(self, epoch):
+        if hasattr(self.dataset, "set_epoch"):
+            self.dataset.set_epoch(epoch)
+
+    def reset_seed(self, *args, **kwargs):
+        if hasattr(self.dataset, "reset_seed"):
+            return self.dataset.reset_seed(*args, **kwargs)
+        return None
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        try:
+            dataset = object.__getattribute__(self, "dataset")
+        except AttributeError as exc:
+            raise AttributeError(name) from exc
+        return getattr(dataset, name)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(split_name={self.split_name!r}, "
+            f"size={len(self)}, dataset={self.dataset!r})"
+        )
+
+
 class BaseTrainer(transformers.Trainer):
 
     def __init__(self, **kwargs):
@@ -448,24 +489,25 @@ class BaseTrainer(transformers.Trainer):
         with self.timer.with_label("model_forward"):
             outputs = model(inputs)
         ### For additional losses, track and log their moving averages
-        for key, value in outputs.items():
-            if key.endswith("_loss") and key != "loss":
-                # Initialize queue if not exists
-                if key not in self.loss_queues:
-                    self.loss_queues[key] = []
+        if model.training:
+            for key, value in outputs.items():
+                if key.endswith("_loss") and key != "loss":
+                    # Initialize queue if not exists
+                    if key not in self.loss_queues:
+                        self.loss_queues[key] = []
 
-                # Add current loss value to queue
-                current_value = value.item() if torch.is_tensor(value) else value
-                self.loss_queues[key].append(current_value)
+                    # Add current loss value to queue
+                    current_value = value.item() if torch.is_tensor(value) else value
+                    self.loss_queues[key].append(current_value)
 
-                # Keep only last N values
-                if len(self.loss_queues[key]) > self.loss_queue_size:
-                    self.loss_queues[key].pop(0)
+                    # Keep only last N values
+                    if len(self.loss_queues[key]) > self.loss_queue_size:
+                        self.loss_queues[key].pop(0)
 
-                # Log average every 10 steps
-                if self.current_step % self.loss_queue_size == 0:
-                    avg_loss = sum(self.loss_queues[key]) / len(self.loss_queues[key])
-                    self.log({f"{key}_avg": avg_loss})
+                    # Log average every 10 steps
+                    if self.current_step % self.loss_queue_size == 0:
+                        avg_loss = sum(self.loss_queues[key]) / len(self.loss_queues[key])
+                        self.log({f"{key}_avg": avg_loss})
 
         loss = outputs["loss"]
 
@@ -717,7 +759,7 @@ class BaseExperiment(ABC):
         )
         print("Successfully dumped metadata")
 
-        val_dataset = self.create_val_dataset(cfg, model)
+        train_dataset, val_dataset = self.create_train_val_datasets(cfg, model, train_dataset)
         data_collator = self.create_data_collator(cfg, model)
         trainer = self.create_trainer(
             cfg=cfg,
@@ -734,6 +776,7 @@ class BaseExperiment(ABC):
         self.training_args = training_args
         self.resume_from_checkpoint = resume_from_checkpoint
         self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
         self.trainer = trainer
 
     def create_model(self, cfg, training_args):
@@ -785,6 +828,114 @@ class BaseExperiment(ABC):
 
     def create_val_dataset(self, cfg, model):
         return None
+
+    def create_train_val_datasets(self, cfg, model, train_dataset):
+        val_dataset = self.create_val_dataset(cfg, model)
+        if val_dataset is not None:
+            return train_dataset, val_dataset
+
+        split_ratio = float(cfg.get("validation_split_ratio", 0.0) or 0.0)
+        if split_ratio <= 0.0:
+            return train_dataset, None
+        if split_ratio >= 1.0:
+            raise ValueError(f"validation_split_ratio must be in [0, 1), got {split_ratio}")
+        if isinstance(train_dataset, ShardedLeRobotMixtureDataset):
+            return self.create_sharded_train_val_split(cfg, train_dataset, split_ratio)
+
+        dataset_len = len(train_dataset)
+        if dataset_len < 2:
+            raise ValueError("Need at least 2 training samples to create a validation split")
+
+        val_count = max(1, int(round(dataset_len * split_ratio)))
+        max_val_samples = cfg.get("validation_max_samples", None)
+        if max_val_samples is not None:
+            val_count = min(val_count, int(max_val_samples))
+        if val_count <= 0:
+            return train_dataset, None
+        if val_count >= dataset_len:
+            raise ValueError(
+                f"Validation split would use {val_count}/{dataset_len} samples; "
+                "lower validation_split_ratio or validation_max_samples."
+            )
+
+        split_seed = int(cfg.get("validation_split_seed", cfg.get("seed", 0)))
+        generator = torch.Generator()
+        generator.manual_seed(split_seed)
+        indices = torch.randperm(dataset_len, generator=generator).tolist()
+        val_indices = sorted(indices[:val_count])
+        train_indices = sorted(indices[val_count:])
+
+        train_subset = DatasetIndexSubset(train_dataset, train_indices, split_name="train")
+        val_subset = DatasetIndexSubset(train_dataset, val_indices, split_name="validation")
+        mprint(
+            f"Created validation split: train={len(train_subset)}, "
+            f"validation={len(val_subset)} ({split_ratio:.2%}), seed={split_seed}"
+        )
+        return train_subset, val_subset
+
+    def create_sharded_train_val_split(self, cfg, train_dataset, split_ratio):
+        split_seed = int(cfg.get("validation_split_seed", cfg.get("seed", 0)))
+        all_shard_count = len(train_dataset.all_shards)
+        if all_shard_count < 2:
+            raise ValueError("Need at least 2 shards to create a validation split")
+
+        val_shard_count = max(1, int(round(all_shard_count * split_ratio)))
+        if val_shard_count >= all_shard_count:
+            raise ValueError(
+                f"Validation split would use {val_shard_count}/{all_shard_count} shards; "
+                "lower validation_split_ratio."
+            )
+
+        rng = np.random.default_rng(split_seed)
+        shuffled_shard_indices = rng.permutation(all_shard_count).tolist()
+        val_shard_indices = sorted(shuffled_shard_indices[:val_shard_count])
+        train_shard_indices = sorted(shuffled_shard_indices[val_shard_count:])
+
+        val_dataset_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train_dataset, resolve=True))
+        with open_dict(val_dataset_cfg):
+            val_dataset_cfg.mixture_kwargs.training = False
+            val_dataset_cfg.mixture_kwargs.seed = split_seed
+            val_dataset_cfg.mixture_kwargs.shard_sampling_rate = 1.0
+            val_dataset_cfg.mixture_kwargs.num_shards_to_sample = val_shard_count
+        val_dataset = instantiate(val_dataset_cfg)
+
+        self.restrict_sharded_dataset(train_dataset, train_shard_indices)
+        self.restrict_sharded_dataset(
+            val_dataset,
+            val_shard_indices,
+            num_shards_to_sample=val_shard_count,
+            shard_sampling_rate=1.0,
+        )
+        mprint(
+            f"Created sharded validation split: train_shards={len(train_shard_indices)}, "
+            f"validation_shards={len(val_shard_indices)} ({split_ratio:.2%}), "
+            f"validation_samples={len(val_dataset)}, seed={split_seed}"
+        )
+        return train_dataset, val_dataset
+
+    @staticmethod
+    def restrict_sharded_dataset(
+        dataset,
+        selected_shard_indices,
+        num_shards_to_sample=None,
+        shard_sampling_rate=None,
+    ):
+        selected_shard_indices = list(selected_shard_indices)
+        if not selected_shard_indices:
+            raise ValueError("selected_shard_indices must not be empty")
+
+        all_shards = list(dataset.all_shards)
+        shard_sampling_weights = np.asarray(dataset.shard_sampling_weights)
+        selected_weights = shard_sampling_weights[selected_shard_indices].astype(np.float64)
+        selected_weights /= selected_weights.sum()
+
+        dataset._all_shards = [all_shards[i] for i in selected_shard_indices]
+        dataset._shard_sampling_weights = selected_weights
+        if num_shards_to_sample is not None:
+            dataset.num_shards_to_sample = int(num_shards_to_sample)
+        if shard_sampling_rate is not None:
+            dataset.shard_sampling_rate = float(shard_sampling_rate)
+        dataset._shards_sample_schedule = dataset.generate_shards_sample_schedule()
 
     def create_data_collator(self, cfg, model):
         return instantiate(cfg.data_collator)

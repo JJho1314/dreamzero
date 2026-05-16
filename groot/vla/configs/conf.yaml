@@ -68,10 +68,14 @@ max_steps: -1
 save_strategy: steps
 save_steps: 500
 eval_strategy: "no"  # there has to be a double quote; otherwise a bare `no` will be interpreted as False
+eval_steps: 500
 save_total_limit: 8
 report_to: wandb
 seed: 42
 do_eval: false
+validation_split_ratio: 0.0
+validation_split_seed: ${seed}
+validation_max_samples: null
 gradient_checkpointing: false
 ddp_find_unused_parameters: false
 ddp_bucket_cap_mb: 100
@@ -98,6 +102,7 @@ training_args:
   gradient_checkpointing: ${gradient_checkpointing}
   bf16: ${bf16}
   tf32: ${tf32}
+  bf16_full_eval: ${eval_bf16}
   per_device_train_batch_size: ${per_device_train_batch_size}
   per_device_eval_batch_size: ${per_device_eval_batch_size}
   gradient_accumulation_steps: ${gradient_accumulation_steps}
@@ -117,6 +122,8 @@ training_args:
   max_steps: ${max_steps}
   save_strategy: ${save_strategy}
   save_steps: ${save_steps}
+  eval_strategy: ${eval_strategy}
+  eval_steps: ${eval_steps}
   save_total_limit: ${save_total_limit}
   report_to: ${report_to}
   seed: ${seed}
