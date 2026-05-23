@@ -1,8 +1,8 @@
 # @package _global_
 # LIBERO data config for Wan 2.2 5B backbone.
 # Per-view resolution is 224x224. Two LIBERO views are concatenated horizontally
-# by DreamTransform to 224x448, then the Wan22 action head resizes to 160x320
-# before VAE/DiT so frame_seqlen remains 50.
+# by DreamTransform to 224x448. Use the wan_flow_matching_action_tf_wan22_224
+# action-head config to keep the full 224x448 input and frame_seqlen=98.
 # LIBERO action is delta-EEF + gripper, so we do NOT relativize again
 # (relative_action: false, relative_action_keys: []).
 
@@ -12,6 +12,7 @@ defaults:
 
 image_resolution_width: 224
 image_resolution_height: 224
+num_frames: 9
 
 max_state_dim: 64
 use_global_metadata: false
@@ -19,7 +20,7 @@ relative_action: false
 relative_action_per_horizon: false
 relative_action_keys: []
 
-max_chunk_size: 4
+max_chunk_size: 1
 dataset_shard_sampling_rate: 0.1
 mixture_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotMixtureDataset.from_mixture_spec
 single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotSubLangSingleActionChunkDatasetDROID

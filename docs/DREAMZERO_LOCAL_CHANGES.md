@@ -19,6 +19,7 @@
   - `video.primary_image`
   - `video.wrist_image`
   - `state.eef_pose`
+  - `state.pad`
   - `state.gripper`
   - `action.eef`
   - `action.gripper`
@@ -48,7 +49,9 @@
   - `num_views: 2`
   - `libero_prompt_style: raw`
   - `libero_sim: 14`
-- 注意：当前 DiT 内部 action/state projector 仍沿用原始实现，会把 `embodiment_id` 覆盖为 category `0`，所以这里的独立 id 主要用于 transform 侧分支和训练链路隔离，不会额外新增一套可训练 projector 参数。
+- DiT 内部 action/state projector 现在通过 `action_projector_num_embeddings: 2` 分出两行参数，并由 transform 侧把原始 tag 映射成紧凑的 projector id：
+  - `libero_sim -> 0`
+  - `oxe_droid -> 1`
 
 ## 2. 图像与序列 Transform 改动
 
@@ -68,6 +71,10 @@
     ```
 
   - 这样保持最终 token 数不变，但有效图像区域更大。
+- LIBERO 专用图像预处理与 FastWAM/LingBotVA 对齐：
+  - 每个视角只做 `ToTensor -> Resize -> ToNumpy`。
+  - 不再使用通用 DreamZero 的随机 crop 和 color jitter。
+  - 启用 frame cache 时，resize 已经预先写入缓存，训练脚本会跳过在线 crop/resize。
 - 为 LIBERO 新增独立 prompt style，避免误用 DROID 的多视角描述：
   - `raw`: 直接使用 LIBERO task 文本，当前 LIBERO 专用配置默认使用这个模式。
   - `simple`: `A robot ...`
@@ -110,7 +117,7 @@
 - 新增 `scripts/data/precompute_frame_cache.py`：
   - 扫描 source root 下所有 `.mp4`
   - 用 decord 解码
-  - resize 到指定方形尺寸，默认 `160`，也支持 `224`
+  - resize 到指定方形尺寸，默认 `224`
   - 保存为 `.npy`
 - 新增 `scripts/data/precompute_fastwam_frame_cache.sbatch`，用于 HPC 上批量生成 LIBERO frame cache。
 - `VideoCrop` 和 `VideoResize` 支持通过环境变量禁用：
@@ -126,6 +133,7 @@
   - 其他情况下默认使用 `160`。
   - 有 cache 时训练侧 image resolution 设置为 `${FRAME_CACHE_SIZE}x${FRAME_CACHE_SIZE}`
   - 同时跳过原始 crop/resize
+  - LIBERO transform 本身不再做随机 crop/color jitter
   - 训练时避免反复视频解码和 resize
 
 ### 224 分辨率 Action Head 配置
@@ -141,6 +149,7 @@
   - transform 水平拼接后 DiT/VAE 输入：`224x448`
   - VAE38 spatial downsample 后 latent：`14x28`
   - DiT patch stride `(1, 2, 2)` 后每帧 token 数：`7x14 = 98`
+  - 默认启用 `decouple_video_action_noise=true`
 - 使用方式：
 
   ```bash
@@ -285,7 +294,7 @@
 - 图像处理：
   - LIBERO obs 里读取 `agentview_image` 和 `robot0_eye_in_hand_image`
   - 做 LIBERO 所需翻转
-  - center crop + resize 到 `DREAMZERO_LIBERO_VIEW_SIZE`，默认 `160`
+  - center crop + resize 到 checkpoint 的 action-head 输入尺寸；未能自动读取时默认 `224`
   - 送入 DreamZero 的两视角 transform
 - 动作处理：
   - 从 DreamZero 输出中取 `action.eef` 和 `action.gripper`
@@ -338,8 +347,11 @@ PER_DEVICE_BS=4 \
 GLOBAL_BATCH_SIZE=64 \
 MAX_STEPS=30000 \
 SAVE_STEPS=5000 \
+MAX_CHUNK_SIZE=1 \
+NUM_FRAMES=9 \
 USE_FRAME_CACHE=true \
-ACTION_HEAD_CONFIG=wan_flow_matching_action_tf_wan22 \
+ACTION_HEAD_CONFIG=wan_flow_matching_action_tf_wan22_224 \
+DECOUPLE_VIDEO_ACTION_NOISE=true \
 TRANSFORM_CONFIG=dreamzero_cotrain_libero \
 bash scripts/train/libero_training.sh
 ```

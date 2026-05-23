@@ -43,7 +43,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", required=True)
     parser.add_argument("--cache-root", required=True)
-    parser.add_argument("--size", type=int, default=160)
+    parser.add_argument("--size", type=int, default=224)
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()

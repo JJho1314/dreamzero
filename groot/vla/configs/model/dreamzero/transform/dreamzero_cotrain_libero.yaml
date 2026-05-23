@@ -16,8 +16,8 @@ action_projector_num_embeddings: 2
 
 embodiment_tag_to_projector_index:
   # Independent LIBERO id; do not share OXE_DROID's id 17.
-  # The current DiT action/state projectors are shared internally; this id is
-  # used by the transform and prompt path to keep LIBERO separate from DROID.
+  # This raw id is used by the transform and prompt route. Dense DiT
+  # action/state projector rows are assigned by action_projector_tag_to_index.
   libero_sim: 14
 
 action_projector_tag_to_index:

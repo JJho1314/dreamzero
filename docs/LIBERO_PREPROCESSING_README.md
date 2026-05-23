@@ -19,6 +19,21 @@ Files:
 - `groot/vla/model/dreamzero/transform/dreamzero_cotrain.py`
 - `groot/vla/configs/model/dreamzero/transform/dreamzero_cotrain_libero.yaml`
 
+### Per-view image preprocessing
+
+LIBERO per-view preprocessing is kept aligned with the FastWAM/LingBotVA LIBERO path:
+
+```text
+ToTensor -> Resize -> ToNumpy
+```
+
+The LIBERO branch does not use the generic DreamZero random crop or color jitter transforms. When frame cache is enabled, resize is already baked into the cached frames and `libero_training.sh` disables online crop/resize.
+
+Files:
+
+- `groot/vla/configs/data/dreamzero/base_48_wan_fine_aug_relative.yaml`
+- `scripts/train/libero_training.sh`
+
 ### LIBERO-specific prompt path
 
 LIBERO uses raw task language by default, instead of DROID's multi-view layout description. This avoids mixing DROID prompt semantics into LIBERO training.
@@ -99,8 +114,11 @@ PER_DEVICE_BS=4 \
 GLOBAL_BATCH_SIZE=64 \
 MAX_STEPS=30000 \
 SAVE_STEPS=5000 \
+MAX_CHUNK_SIZE=1 \
+NUM_FRAMES=9 \
 USE_FRAME_CACHE=true \
-ACTION_HEAD_CONFIG=wan_flow_matching_action_tf_wan22 \
+ACTION_HEAD_CONFIG=wan_flow_matching_action_tf_wan22_224 \
+DECOUPLE_VIDEO_ACTION_NOISE=true \
 TRANSFORM_CONFIG=dreamzero_cotrain_libero \
 bash scripts/train/libero_training.sh
 ```

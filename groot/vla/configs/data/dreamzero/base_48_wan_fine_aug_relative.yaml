@@ -344,8 +344,12 @@ transform_yam:
 
 ################################################################################
 # libero_sim (LIBERO Sim: 2 views (primary + wrist),
-#   state 8 dims [eef_pose 6 + gripper-pair 2 (cols 7..8 mirror)],
-#   action 7 dims [delta_eef 6 + gripper 1])
+#   state 8 dims [eef_pose 6 + gripper qpos pair 2],
+#   action 7 dims [delta_eef 6 + gripper 1]).
+#
+# Existing converted LIBERO metadata stores the two gripper qpos scalars as
+# state.pad and state.gripper. Keep both keys in the concat order so the model
+# receives the same 8D proprio signal as FastWAM.
 ################################################################################
 
 modality_config_libero_sim:
@@ -361,6 +365,7 @@ modality_config_libero_sim:
     delta_indices: [0]
     modality_keys:
       - state.eef_pose
+      - state.pad
       - state.gripper
   action:
     _target_: groot.vla.data.dataset.ModalityConfig
@@ -379,11 +384,7 @@ transform_libero_sim:
   transforms:
     - <<: *totensor_cfg
       apply_to: ${modality_config_libero_sim.video.modality_keys}
-    - <<: *crop_cfg
-      apply_to: ${modality_config_libero_sim.video.modality_keys}
     - <<: *resize_cfg
-      apply_to: ${modality_config_libero_sim.video.modality_keys}
-    - <<: *color_jitter_cfg
       apply_to: ${modality_config_libero_sim.video.modality_keys}
     - <<: *to_numpy_cfg
       apply_to: ${modality_config_libero_sim.video.modality_keys}
@@ -393,15 +394,16 @@ transform_libero_sim:
     - _target_: groot.vla.data.transform.StateActionTransform
       apply_to: ${modality_config_libero_sim.state.modality_keys}
       normalization_modes:
-        state.eef_pose: q99
-        state.gripper: q99
+        state.eef_pose: min_max
+        state.pad: min_max
+        state.gripper: min_max
 
     - _target_: groot.vla.data.transform.StateActionToTensor
       apply_to: ${modality_config_libero_sim.action.modality_keys}
     - _target_: groot.vla.data.transform.StateActionTransform
       apply_to: ${modality_config_libero_sim.action.modality_keys}
       normalization_modes:
-        action.eef: q99
+        action.eef: min_max
         action.gripper: min_max
 
     - _target_: groot.vla.data.transform.ConcatTransform

@@ -92,7 +92,7 @@ from libero.libero.envs import OffScreenRenderEnv  # noqa: E402
 LOG = logging.getLogger("dreamzero_libero_eval")
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
-MODEL_VIEW_SIZE = int(os.getenv("DREAMZERO_LIBERO_VIEW_SIZE", "160"))
+DEFAULT_MODEL_VIEW_SIZE = int(os.getenv("DREAMZERO_LIBERO_VIEW_SIZE", "224"))
 FRAMES_PER_CHUNK = 4
 FASTWAM_NUM_STEPS_WAIT = 30
 
@@ -138,7 +138,7 @@ def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
     return (quat[:3] * 2.0 * math.acos(float(quat[3])) / den).astype(np.float32)
 
 
-def _center_crop_resize(image: np.ndarray, size: int = MODEL_VIEW_SIZE) -> np.ndarray:
+def _center_crop_resize(image: np.ndarray, size: int) -> np.ndarray:
     pil = Image.fromarray(image)
     src_w, src_h = pil.size
     scale = max(size / src_w, size / src_h)
@@ -149,10 +149,10 @@ def _center_crop_resize(image: np.ndarray, size: int = MODEL_VIEW_SIZE) -> np.nd
     return np.asarray(resized.crop((left, top, left + size, top + size)), dtype=np.uint8)
 
 
-def _get_libero_images(obs: dict) -> tuple[np.ndarray, np.ndarray]:
+def _get_libero_images(obs: dict, size: int) -> tuple[np.ndarray, np.ndarray]:
     primary = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
     wrist = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
-    return _center_crop_resize(primary), _center_crop_resize(wrist)
+    return _center_crop_resize(primary, size), _center_crop_resize(wrist, size)
 
 
 def _state_from_obs(obs: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -162,8 +162,32 @@ def _state_from_obs(obs: dict) -> tuple[np.ndarray, np.ndarray]:
             _quat2axisangle(obs["robot0_eef_quat"]).reshape(-1),
         )
     )
-    gripper = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(-1)[:1]
-    return eef_pose.astype(np.float64), gripper.astype(np.float64)
+    gripper_qpos = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(-1)
+    if gripper_qpos.size == 0:
+        raise ValueError("LIBERO observation is missing robot0_gripper_qpos values")
+    if gripper_qpos.size == 1:
+        gripper_qpos = np.repeat(gripper_qpos, 2)
+    return eef_pose.astype(np.float64), gripper_qpos[:2].astype(np.float64)
+
+
+def _infer_model_view_size(policy: GrootSimPolicy) -> int:
+    if "DREAMZERO_LIBERO_VIEW_SIZE" in os.environ:
+        return DEFAULT_MODEL_VIEW_SIZE
+    try:
+        action_head = policy.trained_model.action_head
+        cfg = action_head.config
+        target_h = int(getattr(cfg, "target_video_height", 0) or 0)
+        target_w = int(getattr(cfg, "target_video_width", 0) or 0)
+    except Exception:
+        return DEFAULT_MODEL_VIEW_SIZE
+    if target_h > 0 and target_w == 2 * target_h:
+        return target_h
+    return DEFAULT_MODEL_VIEW_SIZE
+
+
+def _gripper_state_keys(gripper_qpos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Converted LIBERO metadata names the two qpos scalars state.pad and state.gripper.
+    return gripper_qpos[:1], gripper_qpos[1:2]
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -221,6 +245,7 @@ def _env_gripper_from_rlds(
 class DreamZeroLiberoPolicy:
     def __init__(self, policy: GrootSimPolicy):
         self.policy = policy
+        self.view_size = _infer_model_view_size(policy)
         self.primary_frames: deque[np.ndarray] = deque(maxlen=FRAMES_PER_CHUNK)
         self.wrist_frames: deque[np.ndarray] = deque(maxlen=FRAMES_PER_CHUNK)
         self.first_call = True
@@ -238,7 +263,7 @@ class DreamZeroLiberoPolicy:
         action_head.crossattn_cache_neg = None
 
     def predict_action_chunk(self, obs: dict, task_description: str) -> np.ndarray:
-        primary, wrist = _get_libero_images(obs)
+        primary, wrist = _get_libero_images(obs, self.view_size)
         self.primary_frames.append(primary)
         self.wrist_frames.append(wrist)
 
@@ -249,11 +274,13 @@ class DreamZeroLiberoPolicy:
             primary_frames.insert(0, primary_frames[0])
             wrist_frames.insert(0, wrist_frames[0])
 
-        eef_pose, gripper = _state_from_obs(obs)
+        eef_pose, gripper_qpos = _state_from_obs(obs)
+        gripper_pad, gripper = _gripper_state_keys(gripper_qpos)
         converted = {
             "video.primary_image": np.stack(primary_frames[-num_frames:], axis=0),
             "video.wrist_image": np.stack(wrist_frames[-num_frames:], axis=0),
             "state.eef_pose": eef_pose.reshape(1, -1),
+            "state.pad": gripper_pad.reshape(1, -1),
             "state.gripper": gripper.reshape(1, -1),
             "annotation.task": str(task_description),
         }
@@ -266,6 +293,7 @@ class DreamZeroLiberoPolicy:
 class DreamZeroLiberoVectorPolicy:
     def __init__(self, policy: GrootSimPolicy):
         self.policy = policy
+        self.view_size = _infer_model_view_size(policy)
         self.primary_frames: list[deque[np.ndarray]] = []
         self.wrist_frames: list[deque[np.ndarray]] = []
         self.first_calls: list[bool] = []
@@ -291,11 +319,12 @@ class DreamZeroLiberoVectorPolicy:
         primary_batch = []
         wrist_batch = []
         eef_batch = []
+        gripper_pad_batch = []
         gripper_batch = []
         num_frames = 1 if all(self.first_calls) else FRAMES_PER_CHUNK
 
         for env_index, obs in enumerate(obses):
-            primary, wrist = _get_libero_images(obs)
+            primary, wrist = _get_libero_images(obs, self.view_size)
             self.primary_frames[env_index].append(primary)
             self.wrist_frames[env_index].append(wrist)
 
@@ -305,16 +334,19 @@ class DreamZeroLiberoVectorPolicy:
                 primary_frames.insert(0, primary_frames[0])
                 wrist_frames.insert(0, wrist_frames[0])
 
-            eef_pose, gripper = _state_from_obs(obs)
+            eef_pose, gripper_qpos = _state_from_obs(obs)
+            gripper_pad, gripper = _gripper_state_keys(gripper_qpos)
             primary_batch.append(np.stack(primary_frames[-num_frames:], axis=0))
             wrist_batch.append(np.stack(wrist_frames[-num_frames:], axis=0))
             eef_batch.append(eef_pose.reshape(1, -1))
+            gripper_pad_batch.append(gripper_pad.reshape(1, -1))
             gripper_batch.append(gripper.reshape(1, -1))
 
         converted = {
             "video.primary_image": np.stack(primary_batch, axis=0),
             "video.wrist_image": np.stack(wrist_batch, axis=0),
             "state.eef_pose": np.stack(eef_batch, axis=0),
+            "state.pad": np.stack(gripper_pad_batch, axis=0),
             "state.gripper": np.stack(gripper_batch, axis=0),
             "annotation.task": np.asarray([str(task_description)] * len(obses)),
         }

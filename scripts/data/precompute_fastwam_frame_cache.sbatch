@@ -17,8 +17,8 @@ cd /data/user/jhe724/workspace/dreamzero
 mkdir -p logs
 
 SOURCE_ROOT=${SOURCE_ROOT:-/data/user/jhe724/workspace/data/libero_fastwam}
-CACHE_ROOT=${CACHE_ROOT:-/data/user/jhe724/workspace/data/libero_fastwam_frame_cache_160}
-SIZE=${SIZE:-160}
+CACHE_ROOT=${CACHE_ROOT:-/data/user/jhe724/workspace/data/libero_fastwam_frame_cache_224}
+SIZE=${SIZE:-224}
 WORKERS=${WORKERS:-12}
 PYTHON_BIN=${PYTHON_BIN:-/data/user/jhe724/.conda/envs/dreamzero/bin/python}
 
